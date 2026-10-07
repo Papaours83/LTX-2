@@ -43,6 +43,20 @@ def taille_fichier_echange_go() -> float:
         return 0
 
 
+def creation_deja_en_cours() -> bool:
+    """Vrai si un autre processus ltx_pipelines tourne deja (lance d'ici ou d'ailleurs)."""
+    try:
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "(Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
+             "Where-Object CommandLine -like '*ltx_pipelines*' | Measure-Object).Count"],
+            capture_output=True, text=True, timeout=20, creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        return int(out.stdout.strip() or 0) > 0
+    except Exception:
+        return False
+
+
 class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
@@ -180,6 +194,13 @@ class App(tk.Tk):
         if seed_txt and not seed_txt.isdigit():
             messagebox.showinfo("LTX-2", "Le seed doit etre un nombre entier (ou vide).")
             return
+        if creation_deja_en_cours() and not messagebox.askyesno(
+            "LTX-2",
+            "Une autre creation de video tourne deja sur cet ordinateur.\n"
+            "En lancer une deuxieme va tres probablement echouer (carte graphique saturee).\n\n"
+            "Lancer quand meme ?",
+        ):
+            return
         seed = int(seed_txt) if seed_txt else random.randint(0, 99999)
         secondes = round(self.duree.get())
         frames = round(secondes * 24 / 8) * 8 + 1  # le modele attend 8k+1 images (24 images/s)
@@ -237,22 +258,29 @@ class App(tk.Tk):
             self.after(1000, self.chrono)
 
     def suivre(self, process: subprocess.Popen, sortie: Path) -> None:
-        # Les barres de progression du programme se reecrivent avec "\r" : on garde la derniere.
+        # Les barres de progression se reecrivent avec un "\r" seul : on les affiche dans la ligne
+        # d'etat. Un "\r\n" (fin de ligne Windows) est une vraie ligne, qui va dans le journal.
         tampon = b""
+        ligne_cr = None  # ligne terminee par "\r", en attente de savoir si un "\n" suit
         while True:
             octet = process.stdout.read(1)
             if not octet:
                 break
-            if octet in (b"\r", b"\n"):
-                ligne = tampon.decode("utf-8", errors="replace").strip()
+            if octet == b"\r":
+                ligne_cr = tampon.decode("utf-8", errors="replace").strip()
                 tampon = b""
+            elif octet == b"\n":
+                ligne = tampon.decode("utf-8", errors="replace").strip() or ligne_cr
+                tampon, ligne_cr = b"", None
                 if ligne:
-                    if octet == b"\n":
-                        self.after(0, self.ecrire, ligne)
-                    else:
-                        self.after(0, lambda l=ligne: self.statut.config(text=l[:140]))
+                    self.after(0, self.ecrire, ligne)
             else:
+                if ligne_cr:
+                    self.after(0, lambda l=ligne_cr: self.statut.config(text=l[:140]))
+                ligne_cr = None
                 tampon += octet
+        if ligne_cr or tampon:
+            self.after(0, self.ecrire, (tampon.decode("utf-8", errors="replace") or ligne_cr).strip())
         process.wait()
         self.after(0, self.fin, process.returncode, sortie)
 
