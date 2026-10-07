@@ -269,6 +269,9 @@ class App(tk.Tk):
             self.voir()
         else:
             self.statut.config(text="Echec de la creation. Regarde la fin du journal.")
+            self.ecrire(f"\nLe programme s'est arrete (code {code}).")
+            if code in (3221225477, -1073741819):  # 0xC0000005 : plantage brutal (acces memoire)
+                self.ecrire("Plantage brutal de Python (acces memoire). Envoie ce journal a Claude.")
             texte = self.journal.get("1.0", "end")
             if "1455" in texte or "pagination" in texte:
                 messagebox.showerror("LTX-2", "Fichier d'echange Windows trop petit (erreur 1455).\n"

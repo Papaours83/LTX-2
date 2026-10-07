@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import sys
+import threading
 from collections.abc import Iterator
 
 import safetensors
@@ -20,14 +23,62 @@ _SAFETENSORS_DTYPE_TO_TORCH: dict[str, torch.dtype] = {
 }
 
 
+_SAFETENSORS_DTYPE_TO_TORCH_ALL: dict[str, torch.dtype] = {
+    **_SAFETENSORS_DTYPE_TO_TORCH,
+    "F8_E4M3": torch.float8_e4m3fn,
+    "F8_E5M2": torch.float8_e5m2,
+    "I64": torch.int64,
+    "I32": torch.int32,
+    "I16": torch.int16,
+    "I8": torch.int8,
+    "U8": torch.uint8,
+    "BOOL": torch.bool,
+}
+
+
+class _FileSafetensorsHandle:
+    """Minimal safetensors reader using plain file reads instead of mmap.
+    On Windows, safetensors' mmap-backed storages can be invalidated while still in use
+    (access violations when block-streaming tensors from a background thread), so blocks
+    are read with seek + readinto. Exposes the ``keys`` / ``get_tensor`` subset used here.
+    """
+
+    def __init__(self, path: str) -> None:
+        self._file = open(path, "rb")  # noqa: SIM115 - closed in close()
+        header_len = int.from_bytes(self._file.read(8), "little")
+        header = json.loads(self._file.read(header_len))
+        header.pop("__metadata__", None)
+        self._data_start = 8 + header_len
+        self._entries = header
+        self._lock = threading.Lock()
+
+    def keys(self) -> list[str]:
+        return list(self._entries)
+
+    def get_tensor(self, key: str) -> torch.Tensor:
+        entry = self._entries[key]
+        start, end = entry["data_offsets"]
+        buffer = torch.empty(end - start, dtype=torch.uint8)
+        with self._lock:
+            self._file.seek(self._data_start + start)
+            self._file.readinto(memoryview(buffer.numpy()))
+        return buffer.view(_SAFETENSORS_DTYPE_TO_TORCH_ALL[entry["dtype"]]).reshape(entry["shape"])
+
+    def close(self) -> None:
+        self._file.close()
+
+
 class DiskTensorReader:
     """Key-based tensor accessor over one or more safetensors files."""
 
     def __init__(self, paths: list[str]) -> None:
-        self._handles: list[safetensors.safe_open] = []
+        self._handles: list[safetensors.safe_open | _FileSafetensorsHandle] = []
         self._key_to_handle_idx: dict[str, int] = {}
         for path in paths:
-            handle = safetensors.safe_open(path, framework="pt", device="cpu")
+            if sys.platform == "win32":
+                handle = _FileSafetensorsHandle(path)
+            else:
+                handle = safetensors.safe_open(path, framework="pt", device="cpu")
             handle_idx = len(self._handles)
             self._handles.append(handle)
             for sft_key in handle.keys():  # noqa: SIM118
@@ -37,6 +88,9 @@ class DiskTensorReader:
         return self._handles[self._key_to_handle_idx[key]].get_tensor(key)
 
     def close(self) -> None:
+        for handle in self._handles:
+            if isinstance(handle, _FileSafetensorsHandle):
+                handle.close()
         self._handles.clear()
         self._key_to_handle_idx.clear()
 
