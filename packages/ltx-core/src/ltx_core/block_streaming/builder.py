@@ -253,15 +253,17 @@ class StreamingModelBuilder(Generic[ModelType], ModelBuilderProtocol[ModelType])
             source, lora_sources = self._build_pinned_source(
                 blocks, dtype, cpu_slots_count, block_key_map, lora_sd_and_strengths
             )
-            non_block_loras = lora_sd_and_strengths
+            self._load_non_block_weights(meta_model, non_block_keys, device, dtype, lora_sd_and_strengths)
         else:
+            lora_sources = [LoraSource(lora.path, lora.sd_ops, lora.strength) for lora in self.loras]
+            non_block_loras = [src.as_state_dict_with_strength() for src in lora_sources]
+            # Load non-block weights before DiskTensorReader opens the checkpoint: on Windows, a
+            # second safe_open of a file that already has an open handle yields invalid storages.
+            self._load_non_block_weights(meta_model, non_block_keys, device, dtype, non_block_loras)
             reader = DiskTensorReader(checkpoint_paths)
-            source, lora_sources = self._build_disk_source(
+            source = self._build_disk_source(
                 blocks, dtype, cpu_slots_count, reader, block_key_map, prefetch_depth=_PREFETCH_DEPTH
             )
-            non_block_loras = [src.as_state_dict_with_strength() for src in lora_sources]
-
-        self._load_non_block_weights(meta_model, non_block_keys, device, dtype, non_block_loras)
 
         sync = create_stream_sync(device)
         gpu_pool = BufferPool(source.slot_nbytes, gpu_slots_count, device, reuse_barrier=sync.reuse_barrier)
@@ -371,7 +373,7 @@ class StreamingModelBuilder(Generic[ModelType], ModelBuilderProtocol[ModelType])
         reader: DiskTensorReader,
         block_key_map: dict[int, list[tuple[str, str]]],
         prefetch_depth: int,
-    ) -> tuple[WeightSource, list[LoraSource]]:
+    ) -> WeightSource:
         """Create a DiskWeightSource backed by a DiskBlockReader.
         Pool slots are sized to the largest block and carved per block on read, so
         heterogeneous blocks (e.g. layers with differing attention layouts) share
@@ -404,9 +406,8 @@ class StreamingModelBuilder(Generic[ModelType], ModelBuilderProtocol[ModelType])
             blocks_number=len(blocks),
             prefetch_depth=prefetch_depth,
         )
-        lora_sources = [LoraSource(lora.path, lora.sd_ops, lora.strength) for lora in self.loras]
 
-        return source, lora_sources
+        return source
 
     @torch.inference_mode()
     def _load_non_block_weights(

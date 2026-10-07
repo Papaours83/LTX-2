@@ -159,6 +159,13 @@ class App(tk.Tk):
 
     # --- actions -----------------------------------------------------------
     def ecrire(self, texte: str) -> None:
+        # Copie du journal sur le disque, pour pouvoir diagnostiquer apres coup.
+        try:
+            OUTPUTS.mkdir(exist_ok=True)
+            with open(OUTPUTS / "derniere_creation.log", "a", encoding="utf-8") as f:
+                f.write(texte + "\n")
+        except OSError:
+            pass
         self.journal.config(state="normal")
         self.journal.insert("end", texte + "\n")
         self.journal.see("end")
@@ -202,6 +209,7 @@ class App(tk.Tk):
         self.journal.config(state="normal")
         self.journal.delete("1.0", "end")
         self.journal.config(state="disabled")
+        (OUTPUTS / "derniere_creation.log").write_text("", encoding="utf-8")
         self.ecrire(f"Video de {secondes} s, {largeur}x{hauteur}, seed {seed}")
         if self.image:
             self.ecrire(f"Image de depart : {self.image.name}")
