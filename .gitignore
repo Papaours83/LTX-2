@@ -88,3 +88,7 @@ wandb/
 # Binary files
 *.o
 *.so
+
+# Modeles telecharges et videos generees (locaux)
+models/
+outputs/

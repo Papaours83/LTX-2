@@ -8,7 +8,9 @@ import threading
 import tkinter as tk
 from datetime import datetime
 from pathlib import Path
-from tkinter import messagebox, scrolledtext, ttk
+from tkinter import filedialog, messagebox, scrolledtext, ttk
+
+from PIL import Image, ImageTk
 
 ROOT = Path(__file__).resolve().parent
 MODELS = ROOT / "models" / "ltx-2.5"
@@ -45,7 +47,7 @@ class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("LTX-2 - Creer une video")
-        self.geometry("760x680")
+        self.geometry("760x800")
         self.minsize(600, 560)
         self.process: subprocess.Popen | None = None
         self.derniere_video: Path | None = None
@@ -56,6 +58,15 @@ class App(tk.Tk):
         self.prompt = tk.Text(self, height=7, wrap="word", font=("Segoe UI", 10))
         self.prompt.pack(fill="x", **pad)
         self.prompt.insert("1.0", EXEMPLE)
+
+        cadre_image = ttk.LabelFrame(self, text="Image de depart (facultatif) : la video commencera par cette image")
+        cadre_image.pack(fill="x", **pad)
+        self.image: Path | None = None
+        self.apercu = ttk.Label(cadre_image, text="Aucune image", width=22, anchor="center")
+        self.apercu.pack(side="left", padx=8, pady=6)
+        ttk.Button(cadre_image, text="Choisir une image...", command=self.choisir_image).pack(side="left", padx=4)
+        self.btn_retirer = ttk.Button(cadre_image, text="Retirer", command=self.retirer_image, state="disabled")
+        self.btn_retirer.pack(side="left", padx=4)
 
         reglages = ttk.Frame(self)
         reglages.pack(fill="x", **pad)
@@ -114,6 +125,38 @@ class App(tk.Tk):
                 "Problemes frequents, point 1, puis redemarre l'ordinateur.",
             )
 
+    # --- image de depart -----------------------------------------------------
+    def choisir_image(self) -> None:
+        chemin = filedialog.askopenfilename(
+            title="Choisir l'image de depart",
+            filetypes=[("Images", "*.png *.jpg *.jpeg *.webp *.bmp"), ("Tous les fichiers", "*.*")],
+        )
+        if not chemin:
+            return
+        try:
+            with Image.open(chemin) as img:
+                largeur, hauteur = img.size
+                img.thumbnail((160, 110))
+                self.miniature = ImageTk.PhotoImage(img)
+        except Exception:
+            messagebox.showerror("LTX-2", "Impossible d'ouvrir cette image.")
+            return
+        self.image = Path(chemin)
+        self.apercu.config(image=self.miniature, text="", width=0)
+        self.btn_retirer.config(state="normal")
+        # On aligne le format de la video sur l'orientation de l'image.
+        if largeur > hauteur * 1.15:
+            self.format.set("Paysage (768 x 512)")
+        elif hauteur > largeur * 1.15:
+            self.format.set("Portrait (512 x 768)")
+        else:
+            self.format.set("Carre (640 x 640)")
+
+    def retirer_image(self) -> None:
+        self.image = None
+        self.apercu.config(image="", text="Aucune image", width=22)
+        self.btn_retirer.config(state="disabled")
+
     # --- actions -----------------------------------------------------------
     def ecrire(self, texte: str) -> None:
         self.journal.config(state="normal")
@@ -150,11 +193,18 @@ class App(tk.Tk):
             "--num-frames", str(frames), "--seed", str(seed),
             "--output-path", str(sortie), "--prompt", prompt,
         ]
+        if self.image:
+            if not self.image.exists():
+                messagebox.showerror("LTX-2", "L'image choisie n'existe plus. Choisis-en une autre.")
+                return
+            cmd += ["--image", str(self.image), "0", "1.0"]  # image placee sur la 1re image, force maximale
 
         self.journal.config(state="normal")
         self.journal.delete("1.0", "end")
         self.journal.config(state="disabled")
         self.ecrire(f"Video de {secondes} s, {largeur}x{hauteur}, seed {seed}")
+        if self.image:
+            self.ecrire(f"Image de depart : {self.image.name}")
         self.ecrire("Chargement des modeles... (plusieurs minutes, c'est normal)")
         self.statut.config(text="Creation en cours... ne ferme pas la fenetre.")
         self.btn_go.config(state="disabled")
