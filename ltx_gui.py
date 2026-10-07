@@ -5,8 +5,8 @@ import random
 import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
-from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
@@ -36,11 +36,19 @@ def taille_fichier_echange_go() -> float:
         out = subprocess.run(
             ["powershell", "-NoProfile", "-Command",
              "(Get-CimInstance Win32_PageFileUsage | Measure-Object AllocatedBaseSize -Sum).Sum"],
-            capture_output=True, text=True, timeout=20, creationflags=subprocess.CREATE_NO_WINDOW,
+            capture_output=True, text=True, timeout=20, check=False, creationflags=subprocess.CREATE_NO_WINDOW,
         )
         return int(out.stdout.strip() or 0) / 1024
     except Exception:
         return 0
+
+
+def chemin_transformer() -> Path:
+    """Version FP8 pre-convertie (2x moins a lire sur le disque) si elle existe, sinon BF16.
+    Voir tools/convert_transformer_fp8.py."""
+    dossier = MODELS / "diffusion_models"
+    fp8 = dossier / "ltx-2.5-22b-distilled-transformer-fp8.safetensors"
+    return fp8 if fp8.exists() else dossier / "ltx-2.5-22b-distilled-transformer-bf16.safetensors"
 
 
 def creation_deja_en_cours() -> bool:
@@ -50,7 +58,7 @@ def creation_deja_en_cours() -> bool:
             ["powershell", "-NoProfile", "-Command",
              "(Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
              "Where-Object CommandLine -like '*ltx_pipelines*' | Measure-Object).Count"],
-            capture_output=True, text=True, timeout=20, creationflags=subprocess.CREATE_NO_WINDOW,
+            capture_output=True, text=True, timeout=20, check=False, creationflags=subprocess.CREATE_NO_WINDOW,
         )
         return int(out.stdout.strip() or 0) > 0
     except Exception:
@@ -58,7 +66,7 @@ def creation_deja_en_cours() -> bool:
 
 
 class App(tk.Tk):
-    def __init__(self) -> None:
+    def __init__(self) -> None:  # noqa: PLR0915 - construction de la fenetre
         super().__init__()
         self.title("LTX-2 - Creer une video")
         self.geometry("760x800")
@@ -88,8 +96,9 @@ class App(tk.Tk):
         ttk.Label(reglages, text="Duree :").grid(row=0, column=0, sticky="w")
         self.duree = tk.DoubleVar(value=2)
         self.duree_label = ttk.Label(reglages, text="2 s", width=5)
-        ttk.Scale(reglages, from_=1, to=5, variable=self.duree, length=180,
-                  command=lambda v: self.duree_label.config(text=f"{round(float(v))} s")).grid(row=0, column=1, sticky="w")
+        curseur = ttk.Scale(reglages, from_=1, to=5, variable=self.duree, length=180,
+                            command=lambda v: self.duree_label.config(text=f"{round(float(v))} s"))
+        curseur.grid(row=0, column=1, sticky="w")
         self.duree_label.grid(row=0, column=2, sticky="w", padx=(4, 24))
 
         ttk.Label(reglages, text="Format :").grid(row=0, column=3, sticky="w")
@@ -207,10 +216,10 @@ class App(tk.Tk):
         largeur, hauteur = FORMATS[self.format.get()]
 
         OUTPUTS.mkdir(exist_ok=True)
-        sortie = OUTPUTS / f"video_{datetime.now():%Y-%m-%d_%H-%M-%S}.mp4"
+        sortie = OUTPUTS / f"video_{time.strftime('%Y-%m-%d_%H-%M-%S')}.mp4"
         cmd = [
             str(PYTHON), "-m", "ltx_pipelines.distilled",
-            "--transformer-path", str(MODELS / "diffusion_models/ltx-2.5-22b-distilled-transformer-bf16.safetensors"),
+            "--transformer-path", str(chemin_transformer()),
             "--text-encoder-path", str(MODELS / "text_encoders/gemma4-12b-with-proj-ltx-2.5-bf16.safetensors"),
             "--video-vae-path", str(MODELS / "vae/ltx-2.5-video-vae-conv-bf16.safetensors"),
             "--audio-vae-path", str(MODELS / "vae/ltx-2.5-audio-vae-bf16.safetensors"),
@@ -234,13 +243,14 @@ class App(tk.Tk):
         self.ecrire(f"Video de {secondes} s, {largeur}x{hauteur}, seed {seed}")
         if self.image:
             self.ecrire(f"Image de depart : {self.image.name}")
+        self.ecrire(f"Modele : {chemin_transformer().name}")
         self.ecrire("Chargement des modeles... (plusieurs minutes, c'est normal)")
         self.statut.config(text="Creation en cours... ne ferme pas la fenetre.")
         self.btn_go.config(state="disabled")
         self.btn_stop.config(state="normal")
         self.btn_voir.config(state="disabled")
         self.barre.start(15)
-        self.debut = datetime.now()
+        self.debut = time.monotonic()
 
         env = dict(os.environ, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8")
         self.process = subprocess.Popen(
@@ -252,8 +262,8 @@ class App(tk.Tk):
 
     def chrono(self) -> None:
         if self.process and self.process.poll() is None:
-            ecoule = datetime.now() - self.debut
-            m, s = divmod(int(ecoule.total_seconds()), 60)
+            ecoule = time.monotonic() - self.debut
+            m, s = divmod(int(ecoule), 60)
             self.statut.config(text=f"Creation en cours... {m} min {s:02d} s ecoulees. Ne ferme pas la fenetre.")
             self.after(1000, self.chrono)
 
@@ -276,7 +286,7 @@ class App(tk.Tk):
                     self.after(0, self.ecrire, ligne)
             else:
                 if ligne_cr:
-                    self.after(0, lambda l=ligne_cr: self.statut.config(text=l[:140]))
+                    self.after(0, lambda texte=ligne_cr: self.statut.config(text=texte[:140]))
                 ligne_cr = None
                 tampon += octet
         if ligne_cr or tampon:
@@ -311,7 +321,7 @@ class App(tk.Tk):
     def arreter(self) -> None:
         if self.process and self.process.poll() is None:
             subprocess.run(["taskkill", "/F", "/T", "/PID", str(self.process.pid)],
-                           capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+                           capture_output=True, check=False, creationflags=subprocess.CREATE_NO_WINDOW)
             self.ecrire("\nArrete par l'utilisateur.")
 
     def voir(self) -> None:
